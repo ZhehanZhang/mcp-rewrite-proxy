@@ -1,0 +1,23 @@
+# One proxy node. Use this same file, the same .env and the same config/ on every server.
+# Nothing is shared at runtime: each node reads the config file and keeps its own upstream login.
+services:
+  proxy:
+    image: ${IMAGE:-mcp-rewrite-proxy:latest}
+    build: .
+    restart: unless-stopped
+    init: true # reaps the cloudflared child process
+    env_file: .env
+    volumes:
+      # The directory, not the file: a file mount wouldn't see an atomically replaced file.
+      - ./config:/config:ro
+      # This node's upstream login (from `mcp-proxy login`). Back it up or just sign in again.
+      - data:/data
+    # No published ports: traffic arrives through the tunnel connector inside the container.
+    # Long enough for cloudflared's grace period plus draining open SSE streams.
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options: { max-size: 10m, max-file: "5" }
+
+volumes:
+  data:

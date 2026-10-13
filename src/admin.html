@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MCP Proxy Admin</title>
+<style>
+/*BASE_CSS*/
+header{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:14px 20px;border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:2}
+header h1{font-size:16px;margin:0}
+header .spacer{flex:1}
+.badge{display:inline-block;font-size:12px;border-radius:999px;padding:1px 8px;border:1px solid var(--line)}
+.badge.ok{color:var(--ok);border-color:currentColor}
+.badge.off{color:var(--danger);border-color:currentColor}
+.badge.edit{color:var(--accent);border-color:currentColor}
+.badge.hid{color:var(--muted)}
+main{padding:16px 20px;max-width:1400px;margin:0 auto}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.endpoint{display:flex;gap:8px;align-items:center;margin-bottom:12px}
+.endpoint code{background:var(--code);padding:4px 8px;border-radius:6px;overflow:auto;white-space:nowrap}
+nav.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin:12px 0 16px}
+nav.tabs button{border:none;border-bottom:2px solid transparent;border-radius:0;background:none;padding:8px 12px}
+nav.tabs button.active{border-bottom-color:var(--accent);color:var(--accent)}
+.layout{display:grid;grid-template-columns:260px minmax(0,1fr) minmax(0,420px);gap:16px;align-items:start}
+@media (max-width:1100px){.layout{grid-template-columns:220px minmax(0,1fr)}.preview{grid-column:1/-1}}
+@media (max-width:700px){.layout{grid-template-columns:minmax(0,1fr)}}
+.toollist{display:flex;flex-direction:column;gap:2px;max-height:75vh;overflow:auto}
+.toollist button{text-align:left;border:none;background:none;padding:6px 8px;border-radius:6px}
+.toollist button.sel{background:var(--code)}
+.toollist .orig{display:block;font-size:12px;color:var(--muted)}
+.field{margin:0 0 14px}
+.field>label{display:block;font-weight:600;margin-bottom:4px}
+.field .hint{font-size:12px;color:var(--muted);margin-top:4px;white-space:pre-wrap}
+textarea{min-height:70px;resize:vertical}
+textarea.code{min-height:60px}
+.bad{border-color:var(--danger)!important}
+table.params{width:100%;border-collapse:collapse}
+.param{border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:10px}
+.param h4{margin:0 0 8px;display:flex;gap:8px;align-items:center}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+@media (max-width:700px){.grid2{grid-template-columns:1fr}}
+.preview pre{background:var(--code);padding:12px;border-radius:8px;overflow:auto;max-height:75vh;margin:0}
+details>summary{cursor:pointer;color:var(--muted);margin:6px 0}
+.savebar{position:sticky;bottom:0;background:var(--panel);border-top:1px solid var(--line);padding:10px 20px;display:flex;gap:12px;align-items:center;justify-content:flex-end}
+#toast{color:var(--muted)}
+.empty{padding:40px;text-align:center;color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">MCP Proxy</h1>
+  <span id="conn" class="badge">…</span>
+  <span class="muted" id="upstream"></span>
+  <span class="spacer"></span>
+  <button id="refreshBtn">Refresh tools</button>
+  <form method="post" action="/admin/logout" style="margin:0"><button type="submit">Sign out</button></form>
+</header>
+<main>
+  <div id="error" class="warn" hidden></div>
+  <div class="endpoint"><span class="muted">Agents connect to</span><code id="mcpUrl"></code><button id="copyBtn">Copy</button></div>
+  <div class="muted" id="statusLine"></div>
+  <div class="muted" id="configLine" style="margin-top:4px"></div>
+  <nav class="tabs">
+    <button data-tab="tools" class="active">Tools</button>
+    <button data-tab="server">Server</button>
+    <button data-tab="raw">Raw config</button>
+  </nav>
+  <section id="tab-tools"></section>
+  <section id="tab-server" hidden></section>
+  <section id="tab-raw" hidden></section>
+</main>
+<div class="savebar"><span id="toast"></span><button id="revertBtn">Revert</button><button id="copyConfigBtn">Copy config</button><button id="saveBtn" class="primary">Download config</button></div>
+
+<script>
+'use strict';
+const $ = (sel, root) => (root || document).querySelector(sel);
+const el = (tag, props, ...children) => {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (k === 'class') node.className = v;
+    else if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
+    else if (k === 'text') node.textContent = v;
+    else if (v !== undefined && v !== null && v !== false) node.setAttribute(k, v === true ? '' : v);
+  }
+  for (const child of children.flat()) if (child != null) node.append(child.nodeType ? child : document.createTextNode(String(child)));
+  return node;
+};
+
+let state = null;      // server state
+let config = {};       // working copy
+let saved = '{}';      // last saved JSON
+let selected = null;   // selected upstream tool name
+let previewTimer = null;
+
+async function api(path, options = {}) {
+  const res = await fetch(path, { ...options, headers: { 'content-type': 'application/json', ...(options.headers || {}) } });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || res.statusText);
+  return body;
+}
+
+function toast(text) { $('#toast').textContent = text; }
+function showError(text) { const box = $('#error'); box.hidden = !text; box.textContent = text || ''; box.style.whiteSpace = 'pre-line'; }
+
+// ---------- config helpers ----------
+function isEmpty(v) { return v === undefined || (typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).length === 0); }
+function prune(obj) {
+  for (const key of Object.keys(obj)) {
+    const v = obj[key];
+    if (v && typeof v === 'object' && !Array.isArray(v)) prune(v);
+    // '' is kept: it can be a real fixed or default value. Text inputs clear themselves via setField.
+    if (v === undefined || isEmpty(obj[key])) delete obj[key];
+  }
+  return obj;
+}
+function overrides() { config.tools = config.tools || {}; config.tools.overrides = config.tools.overrides || {}; return config.tools.overrides; }
+function toolOverride(name) { const all = overrides(); return (all[name] = all[name] || {}); }
+function paramOverride(tool, param) { const t = toolOverride(tool); t.params = t.params || {}; return (t.params[param] = t.params[param] || {}); }
+function changed() {
+  prune(config);
+  const dirty = JSON.stringify(config) !== saved;
+  toast(dirty ? 'Differs from the config file on this node — download it and deploy it to every node' : '');
+  renderToolList();
+  schedulePreview();
+}
+function setField(obj, key, value) { if (value === undefined || value === '') delete obj[key]; else obj[key] = value; changed(); }
+
+function jsonInput(value, onValue, placeholder) {
+  const area = el('textarea', { class: 'code', placeholder: placeholder || '' });
+  area.value = value === undefined ? '' : JSON.stringify(value, null, 2);
+  area.addEventListener('input', () => {
+    const text = area.value.trim();
+    if (!text) { area.classList.remove('bad'); onValue(undefined); return; }
+    try { const parsed = JSON.parse(text); area.classList.remove('bad'); onValue(parsed); }
+    catch { area.classList.add('bad'); }
+  });
+  return area;
+}
+function textInput(value, onValue, placeholder, multiline) {
+  const input = el(multiline ? 'textarea' : 'input', { placeholder: placeholder || '' });
+  input.value = value == null ? '' : value;
+  input.addEventListener('input', () => onValue(input.value));
+  return input;
+}
+function triSelect(value, onValue, labels) {
+  const select = el('select', {},
+    el('option', { value: '' , text: labels[0] }),
+    el('option', { value: 'true', text: labels[1] }),
+    el('option', { value: 'false', text: labels[2] }));
+  select.value = value === true ? 'true' : value === false ? 'false' : '';
+  select.addEventListener('change', () => onValue(select.value === '' ? undefined : select.value === 'true'));
+  return select;
+}
+function field(label, input, hint) {
+  return el('div', { class: 'field' }, el('label', { text: label }), input, hint ? el('div', { class: 'hint', text: hint }) : null);
+}
+
+// ---------- rendering ----------
+function upstreamTools() { return (state.snapshot && state.snapshot.tools) || []; }
+
+function renderHeader() {
+  const s = state.status;
+  $('#title').textContent = state.proxyName;
+  $('#upstream').textContent = s.upstreamUrl;
+  const conn = $('#conn');
+  conn.className = 'badge ' + (s.connected ? 'ok' : 'off');
+  conn.textContent = (s.connected ? 'signed in' : 'not signed in') + ' · node ' + state.node;
+  $('#refreshBtn').disabled = !s.connected;
+  $('#mcpUrl').textContent = state.mcpUrl;
+  const bits = [];
+  if (s.issuer) bits.push('Auth server: ' + s.issuer + (s.clientSource ? ' (' + s.clientSource + ')' : ''));
+  if (s.scope) bits.push('Scope: ' + s.scope);
+  if (s.expiresAt) bits.push('Token expires ' + new Date(s.expiresAt).toLocaleString() + (s.hasRefreshToken ? ', auto-refreshes' : ', no refresh token'));
+  if (state.snapshot) bits.push(upstreamTools().length + ' tools fetched ' + new Date(state.snapshot.fetchedAt).toLocaleString());
+  $('#statusLine').textContent = bits.join(' · ');
+  $('#configLine').textContent = 'Edits apply once the downloaded file replaces ' + state.configPath + ' on every node (each reloads it within seconds). This page only previews.';
+  const problems = [s.connected ? null : 'This node (' + state.node + ') has no upstream login: run “docker compose exec proxy mcp-proxy login” on it. ' + (s.lastError || ''),
+    state.configError ? 'Config file not applied: ' + state.configError : null, state.snapshotError].filter(Boolean);
+  showError(problems.join('\n'));
+}
+
+function exposedName(tool) {
+  const o = (config.tools && config.tools.overrides && config.tools.overrides[tool.name]) || {};
+  return o.name || tool.name;
+}
+function isHidden(tool) {
+  const o = config.tools && config.tools.overrides && config.tools.overrides[tool.name];
+  return (o && o.hidden) || (config.tools && config.tools.hideUnlisted && !o);
+}
+
+function renderToolList() {
+  const list = $('#toollist');
+  if (!list) return;
+  const filter = ($('#toolfilter').value || '').toLowerCase();
+  list.replaceChildren(...upstreamTools()
+    .filter((t) => !filter || t.name.toLowerCase().includes(filter) || exposedName(t).toLowerCase().includes(filter))
+    .map((tool) => {
+      const o = config.tools && config.tools.overrides && config.tools.overrides[tool.name];
+      const renamed = exposedName(tool) !== tool.name;
+      return el('button', { class: tool.name === selected ? 'sel' : '', onclick: () => { selected = tool.name; renderTools(); } },
+        exposedName(tool), ' ',
+        isHidden(tool) ? el('span', { class: 'badge hid', text: 'hidden' }) : o ? el('span', { class: 'badge edit', text: 'edited' }) : null,
+        renamed ? el('span', { class: 'orig', text: 'upstream: ' + tool.name }) : null);
+    }));
+}
+
+function renderTools() {
+  const root = $('#tab-tools');
+  const tools = upstreamTools();
+  if (!tools.length) {
+    root.replaceChildren(el('div', { class: 'card empty', text: state.status.connected ? 'No tools fetched yet. Click “Refresh tools”.' : 'This node can’t fetch tools until it is signed in to the upstream (mcp-proxy login). Reload to try another node.' }));
+    return;
+  }
+  if (!selected || !tools.some((t) => t.name === selected)) selected = tools[0].name;
+  const tool = tools.find((t) => t.name === selected);
+  const filter = el('input', { id: 'toolfilter', placeholder: 'Filter tools…' });
+  const prevFilter = $('#toolfilter');
+  if (prevFilter) filter.value = prevFilter.value;
+  filter.addEventListener('input', renderToolList);
+  root.replaceChildren(el('div', { class: 'layout' },
+    el('div', {}, filter, el('div', { class: 'toollist', id: 'toollist', style: 'margin-top:8px' })),
+    el('div', { class: 'card' }, toolEditor(tool)),
+    el('div', { class: 'preview' }, el('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' },
+      el('strong', { text: 'What the agent sees' }),
+      el('label', { class: 'muted' }, el('input', { type: 'checkbox', id: 'showOrig', style: 'width:auto', onchange: schedulePreview }), ' show upstream original')),
+      el('pre', { id: 'preview' }))));
+  renderToolList();
+  schedulePreview();
+}
+
+function toolEditor(tool) {
+  const o = (config.tools && config.tools.overrides && config.tools.overrides[tool.name]) || {};
+  const get = () => toolOverride(tool.name);
+  const props = (tool.inputSchema && tool.inputSchema.properties) || {};
+  const required = new Set((tool.inputSchema && tool.inputSchema.required) || []);
+  const ann = o.annotations || {};
+  const annNames = ['readOnlyHint', 'destructiveHint', 'idempotentHint', 'openWorldHint'];
+
+  const visible = el('input', { type: 'checkbox', style: 'width:auto' });
+  visible.checked = !isHidden(tool);
+  visible.addEventListener('change', () => {
+    // In allowlist mode an override entry must exist for the tool to show, so keep an explicit false.
+    if (visible.checked) { if (config.tools && config.tools.hideUnlisted) get().hidden = false; else delete get().hidden; }
+    else get().hidden = true;
+    changed();
+  });
+
+  const descHint = 'Leave empty to keep the upstream text. {{original}} inserts it.\n\nUpstream: ' + (tool.description || '(none)');
+  const desc = textInput(o.description, (v) => setField(get(), 'description', v), '', true);
+  const fillDesc = el('button', { type: 'button', text: 'Start from upstream text', onclick: () => { desc.value = tool.description || ''; setField(get(), 'description', desc.value); } });
+
+  return el('div', {},
+    el('div', { class: 'row', style: 'justify-content:space-between' },
+      el('h3', { style: 'margin:0', text: tool.name }),
+      el('button', { type: 'button', class: 'danger', text: 'Reset tool', onclick: () => { delete overrides()[tool.name]; changed(); renderTools(); } })),
+    el('p', {}, el('label', {}, visible, ' Expose this tool to agents')),
+    el('div', { class: 'grid2' },
+      field('Name', textInput(o.name, (v) => setField(get(), 'name', v), tool.name)),
+      field('Title', textInput(o.title, (v) => setField(get(), 'title', v), tool.title || (tool.annotations && tool.annotations.title) || ''))),
+    field('Description', el('div', {}, desc, el('div', { style: 'margin-top:6px' }, fillDesc)), descHint),
+    field('Annotations', el('div', { class: 'grid2' }, annNames.map((name) =>
+      el('label', {}, name + ' ', triSelect(ann[name], (v) => {
+        const t = get(); t.annotations = t.annotations || {};
+        setField(t.annotations, name, v);
+      }, ['upstream (' + String(tool.annotations && tool.annotations[name] !== undefined ? tool.annotations[name] : 'unset') + ')', 'true', 'false'])))),
+      'Other annotation fields: use the whole-tool patch below.'),
+    el('h3', { text: 'Parameters' }),
+    Object.keys(props).length ? Object.entries(props).map(([name, schema]) => paramEditor(tool, name, schema, required.has(name))) : el('p', { class: 'muted', text: 'This tool takes no parameters.' }),
+    el('details', {}, el('summary', { text: 'Advanced: JSON merge patches (RFC 7396) for any field' }),
+      field('inputSchema patch', jsonInput(o.inputSchema, (v) => setField(get(), 'inputSchema', v), '{"additionalProperties": false}'), 'Applied after the parameter edits above. null deletes a key.'),
+      field('outputSchema patch', jsonInput(o.outputSchema, (v) => setField(get(), 'outputSchema', v), '{"properties": {…}}'), 'Use null to remove the output schema entirely.'),
+      field('Whole-tool patch', jsonInput(o.patch, (v) => setField(get(), 'patch', v), '{"_meta": {…}, "icons": […]}'), 'Applied last, to the entire definition. Reaches every field, including _meta and icons.')));
+}
+
+function paramEditor(tool, name, schema, upstreamRequired) {
+  const p = (((config.tools || {}).overrides || {})[tool.name] || {}).params || {};
+  const o = p[name] || {};
+  const get = () => paramOverride(tool.name, name);
+  const mode = o.value !== undefined ? 'fixed' : o.hidden ? 'hidden' : 'visible';
+  const modeSel = el('select', {},
+    el('option', { value: 'visible', text: 'Visible' }),
+    el('option', { value: 'hidden', text: 'Hidden (drop agent value)' }),
+    el('option', { value: 'fixed', text: 'Hidden, fixed value' }));
+  modeSel.value = mode;
+  const fixedWrap = el('div', {});
+  const visibleWrap = el('div', {});
+  const sync = () => { fixedWrap.hidden = modeSel.value !== 'fixed'; visibleWrap.hidden = modeSel.value !== 'visible'; };
+  modeSel.addEventListener('change', () => {
+    const v = get();
+    if (modeSel.value === 'visible') { delete v.hidden; delete v.value; }
+    if (modeSel.value === 'hidden') { v.hidden = true; delete v.value; }
+    if (modeSel.value === 'fixed') { delete v.hidden; if (v.value === undefined) v.value = schema && schema.default !== undefined ? schema.default : ''; fixedInput.value = JSON.stringify(v.value); }
+    sync(); changed();
+  });
+  const fixedInput = jsonInput(o.value, (v) => { if (v !== undefined) { get().value = v; changed(); } }, '"value as JSON"');
+  fixedWrap.append(field('Value always sent upstream (JSON)', fixedInput));
+
+  visibleWrap.append(
+    el('div', { class: 'grid2' },
+      field('Name agents see', textInput(o.name, (v) => setField(get(), 'name', v), name)),
+      field('Required', triSelect(o.required, (v) => setField(get(), 'required', v), ['upstream (' + (upstreamRequired ? 'required' : 'optional') + ')', 'required', 'optional']))),
+    field('Description', textInput(o.description, (v) => setField(get(), 'description', v), '', true),
+      'Leave empty to keep upstream. {{original}} inserts it.\nUpstream: ' + ((schema && schema.description) || '(none)')),
+    field('Default (JSON)', jsonInput(o.default, (v) => setField(get(), 'default', v), 'e.g. 10 or "en"'), 'Sent upstream when the agent omits this parameter; makes it optional.'),
+    el('details', {}, el('summary', { text: 'Schema patch (type, enum, items, minimum, …)' }),
+      jsonInput(o.schema, (v) => setField(get(), 'schema', v), '{"enum": ["a", "b"]}'),
+      el('div', { class: 'hint', text: 'Upstream schema: ' + JSON.stringify(schema) })));
+  sync();
+  return el('div', { class: 'param' },
+    el('h4', {}, el('code', { text: name }), el('span', { class: 'muted', text: (schema && schema.type) ? String(schema.type) : '' }), upstreamRequired ? el('span', { class: 'badge', text: 'required upstream' }) : null),
+    field('Mode', modeSel), fixedWrap, visibleWrap);
+}
+
+function renderServer() {
+  const root = $('#tab-server');
+  const server = config.server || {};
+  const snap = state.snapshot || {};
+  const get = () => (config.server = config.server || {});
+  const hideUnlisted = el('input', { type: 'checkbox', style: 'width:auto' });
+  hideUnlisted.checked = !!(config.tools && config.tools.hideUnlisted);
+  hideUnlisted.addEventListener('change', () => { config.tools = config.tools || {}; setField(config.tools, 'hideUnlisted', hideUnlisted.checked || undefined); renderTools(); });
+  root.replaceChildren(el('div', { class: 'card', style: 'max-width:820px' },
+    field('Instructions', textInput(server.instructions, (v) => setField(get(), 'instructions', v), '', true),
+      'Sent to the agent at initialize. Leave empty to keep upstream; {{original}} inserts it.\nUpstream: ' + (snap.instructions || '(none)')),
+    field('serverInfo patch (JSON)', jsonInput(server.serverInfo, (v) => setField(get(), 'serverInfo', v), '{"name": "my-tools", "title": "My Tools"}'),
+      'Upstream: ' + JSON.stringify(snap.serverInfo || null)),
+    field('Tool exposure', el('label', {}, hideUnlisted, ' Only expose tools I have edited (allowlist mode)'),
+      'New upstream tools stay hidden until you open and edit them.')));
+}
+
+function renderRaw() {
+  const root = $('#tab-raw');
+  const area = el('textarea', { class: 'code', style: 'min-height:60vh' });
+  area.value = JSON.stringify(config, null, 2);
+  const apply = el('button', { class: 'primary', text: 'Apply to editor', onclick: () => {
+    try { config = JSON.parse(area.value || '{}'); area.classList.remove('bad'); changed(); renderAll(); toast('Applied — remember to Save'); }
+    catch (e) { area.classList.add('bad'); toast('Invalid JSON: ' + e.message); }
+  } });
+  root.replaceChildren(el('div', { class: 'card' },
+    el('p', { class: 'muted', text: 'The full config file (' + state.configPath + '). Paste one here to edit it in the editor, then download it.' }),
+    area, el('div', { class: 'row', style: 'margin-top:8px' }, apply)));
+}
+
+function renderAll() { renderHeader(); renderTools(); renderServer(); renderRaw(); }
+
+function schedulePreview() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(async () => {
+    const pre = $('#preview');
+    if (!pre || !selected) return;
+    const original = upstreamTools().find((t) => t.name === selected);
+    if ($('#showOrig') && $('#showOrig').checked) { pre.textContent = JSON.stringify(original, null, 2); return; }
+    try {
+      const result = await api('/admin/api/preview', { method: 'POST', body: JSON.stringify({ config, tool: selected }) });
+      pre.textContent = result.hidden ? '(hidden — agents cannot see or call this tool)' : JSON.stringify(result.tool, null, 2);
+      pre.classList.remove('bad');
+    } catch (e) { pre.textContent = e.message; pre.classList.add('bad'); }
+  }, 250);
+}
+
+// ---------- actions ----------
+async function load() {
+  state = await api('/admin/api/state');
+  config = state.config || {};
+  saved = JSON.stringify(prune(JSON.parse(JSON.stringify(config))));
+  renderAll();
+  toast('');
+}
+
+async function validated() {
+  prune(config);
+  const text = JSON.stringify(config, null, 2) + '\n';
+  await api('/admin/api/validate', { method: 'POST', body: text });
+  return text;
+}
+$('#saveBtn').addEventListener('click', async () => {
+  try {
+    const text = await validated();
+    const link = el('a', { href: URL.createObjectURL(new Blob([text], { type: 'application/json' })), download: 'proxy.config.json' });
+    document.body.append(link); link.click(); link.remove();
+    toast('Downloaded proxy.config.json — copy it to ' + state.configPath + ' on every node');
+  } catch (e) { toast('Not valid: ' + e.message); }
+});
+$('#copyConfigBtn').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText(await validated()); toast('Config copied'); }
+  catch (e) { toast('Not valid: ' + e.message); }
+});
+$('#revertBtn').addEventListener('click', () => { config = JSON.parse(saved); changed(); renderAll(); });
+$('#refreshBtn').addEventListener('click', async () => {
+  toast('Fetching tools…');
+  try { const r = await api('/admin/api/refresh', { method: 'POST' }); state.snapshot = r.snapshot; renderAll(); toast('Fetched ' + r.snapshot.tools.length + ' tools'); }
+  catch (e) { toast('Refresh failed: ' + e.message); await load().catch(() => {}); }
+});
+$('#copyBtn').addEventListener('click', () => navigator.clipboard.writeText(state.mcpUrl).then(() => toast('Copied')));
+document.querySelectorAll('nav.tabs button').forEach((b) => b.addEventListener('click', () => {
+  document.querySelectorAll('nav.tabs button').forEach((x) => x.classList.toggle('active', x === b));
+  for (const name of ['tools', 'server', 'raw']) $('#tab-' + name).hidden = name !== b.dataset.tab;
+  if (b.dataset.tab === 'raw') renderRaw();
+}));
+window.addEventListener('beforeunload', (e) => { if (JSON.stringify(prune(config)) !== saved) e.preventDefault(); });
+
+load().catch((e) => showError(e.message));
+</script>
+</body>
+</html>

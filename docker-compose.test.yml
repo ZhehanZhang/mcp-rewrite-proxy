@@ -1,0 +1,45 @@
+# Two-node test cluster: a mock OAuth-protected upstream and two proxy nodes reachable directly on
+# :8081 and :8082 (standing in for two servers behind one tunnel). They share only the config
+# directory and the secret; each has its own data volume and upstream login. Used by test/e2e.mjs.
+x-node: &node
+  build: .
+  init: true
+  stop_grace_period: 60s
+  depends_on: [mock-upstream]
+  environment: &node-env
+    PUBLIC_URL: http://localhost:8080
+    UPSTREAM_URL: http://mock-upstream:8788/mcp
+    ADMIN_PASSWORD: dev-password-123
+    PROXY_SECRET: dev-secret-dev-secret-dev-secret-0123456789
+    API_KEYS: dev-api-key-0123456789abcdef
+    PROXY_NAME: MCP Rewrite Proxy (test)
+    DRAIN_TIMEOUT_MS: "5000"
+
+services:
+  mock-upstream:
+    image: node:24.21.0-alpine
+    working_dir: /mock
+    command: ["node", "mock-upstream.mjs"]
+    environment: { MOCK_BASE: "http://mock-upstream:8788" }
+    volumes: ["./test:/mock:ro"]
+    ports: ["8788:8788"]
+
+  node-a:
+    <<: *node
+    ports: ["8081:8080"]
+    volumes: ["./test/tmp/config:/config:ro", "data-a:/data"]
+
+  node-b:
+    <<: *node
+    ports: ["8082:8080"]
+    # Exercises the tunnel supervisor with a stand-in binary.
+    environment:
+      <<: *node-env
+      TUNNEL_TOKEN: fake-token
+      CLOUDFLARED_PATH: /test/fake-cloudflared.sh
+      TUNNEL_GRACE_SECONDS: "2"
+    volumes: ["./test/tmp/config:/config:ro", "data-b:/data", "./test:/test:ro"]
+
+volumes:
+  data-a:
+  data-b:
