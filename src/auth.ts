@@ -37,6 +37,20 @@ export function readCookie(request: Request, name: string): string | undefined {
   return undefined;
 }
 
+/**
+ * A redirect target on this proxy's own origin, or /admin. Resolving the URL (instead of checking
+ * for a leading "/") also catches forms browsers treat as another host, like "/\\evil.example".
+ */
+export function sameOriginPath(next: string, origin: string): string {
+  try {
+    const url = new URL(next, origin);
+    if (url.origin === origin && !/[\\\x00-\x1f]/.test(next)) return url.pathname + url.search;
+  } catch {
+    // fall through
+  }
+  return '/admin';
+}
+
 /** Rejects cross-site form posts and fetches to state-changing endpoints. */
 export function isSameOrigin(request: Request): boolean {
   const origin = request.headers.get('origin');

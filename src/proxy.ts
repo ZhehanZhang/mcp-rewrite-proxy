@@ -56,33 +56,33 @@ export async function proxyMcp(request: Request, env: Env): Promise<Response> {
 
   let body: string | undefined;
   if (request.method === 'POST') {
-    const text = await request.text();
-    body = text;
-    if ((request.headers.get('content-type') ?? '').includes('application/json')) {
-      let parsed: Json;
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        return Response.json({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }, { status: 400 });
-      }
-      const rewritten = rewriteRequest(parsed, rewriter);
-      if (rewritten.body === null) {
-        // Every message was refused (e.g. a call to a hidden tool): answer locally.
-        return Response.json(Array.isArray(parsed) ? rewritten.errors : rewritten.errors[0]);
-      }
-      if (rewritten.errors.length && Array.isArray(parsed)) {
-        // A batch mixing allowed and refused calls (batching left the spec in 2025-06-18): refuse it whole.
-        const message = rewritten.errors.map((e) => (e.error as { message: string }).message).join('; ');
-        return Response.json(
-          parsed
-            .filter((m) => typeof m === 'object' && m !== null && !Array.isArray(m) && 'id' in m)
-            .map((m) => ({ jsonrpc: '2.0', id: (m as { id: Json }).id, error: { code: -32602, message } })),
-        );
-      }
-      body = JSON.stringify(rewritten.body);
-      // Newer protocol versions mirror the tool name in a header; keep it consistent with the body.
-      if (rewritten.toolName && headers.has('mcp-name')) headers.set('mcp-name', rewritten.toolName);
+    // Every POST body is parsed and re-encoded here, whatever its declared Content-Type. Forwarding
+    // a body this proxy didn't parse would let a call slip past the tool rules to an upstream that
+    // is laxer about content types (e.g. "APPLICATION/JSON" or a missing header).
+    let parsed: Json;
+    try {
+      parsed = JSON.parse(await request.text());
+    } catch {
+      return Response.json({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error: the body must be JSON-RPC' } }, { status: 400 });
     }
+    const rewritten = rewriteRequest(parsed, rewriter);
+    if (rewritten.body === null) {
+      // Every message was refused (e.g. a call to a hidden tool): answer locally.
+      return Response.json(Array.isArray(parsed) ? rewritten.errors : rewritten.errors[0]);
+    }
+    if (rewritten.errors.length && Array.isArray(parsed)) {
+      // A batch mixing allowed and refused calls (batching left the spec in 2025-06-18): refuse it whole.
+      const message = rewritten.errors.map((e) => (e.error as { message: string }).message).join('; ');
+      return Response.json(
+        parsed
+          .filter((m) => typeof m === 'object' && m !== null && !Array.isArray(m) && 'id' in m)
+          .map((m) => ({ jsonrpc: '2.0', id: (m as { id: Json }).id, error: { code: -32602, message } })),
+      );
+    }
+    body = JSON.stringify(rewritten.body);
+    headers.set('content-type', 'application/json');
+    // Newer protocol versions mirror the tool name in a header; keep it consistent with the body.
+    if (rewritten.toolName && headers.has('mcp-name')) headers.set('mcp-name', rewritten.toolName);
   }
 
   const send = (token: string) => {

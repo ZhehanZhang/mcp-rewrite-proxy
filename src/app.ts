@@ -2,7 +2,7 @@
 
 import { hostname } from 'node:os';
 import adminHtml from './admin.html';
-import { checkPassword, clearSessionCookie, clientIp, isAdmin, isSameOrigin, loginBlocked, readCookie, recordLoginFailure, sessionCookie } from './auth';
+import { checkPassword, clearSessionCookie, clientIp, isAdmin, isSameOrigin, loginBlocked, readCookie, recordLoginFailure, sameOriginPath, sessionCookie } from './auth';
 import { parseConfig } from './config-file';
 import { fingerprint, randomId } from './crypto';
 import type { Env } from './env';
@@ -39,6 +39,7 @@ const redirect = (location: string, headers: HeadersInit = {}) => {
   return new Response(null, { status: 302, headers: h });
 };
 const jsonError = (status: number, error: string) => Response.json({ error }, { status });
+
 
 // Agents may run in a browser (e.g. MCP Inspector). These endpoints use bearer tokens, not cookies.
 const CORS = {
@@ -141,7 +142,7 @@ async function handleAdmin(request: Request, env: Env): Promise<Response> {
 
   if (path === '/admin/login') {
     const next = (request.method === 'POST' ? String((await request.clone().formData()).get('next') ?? '') : url.searchParams.get('next')) || '/admin';
-    const safeNext = next.startsWith('/') && !next.startsWith('//') ? next : '/admin';
+    const safeNext = sameOriginPath(next, env.settings.publicUrl);
     if (request.method === 'POST') {
       if (!isSameOrigin(request)) return jsonError(403, 'Cross-site request refused');
       const ip = clientIp(request);
