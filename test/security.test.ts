@@ -53,13 +53,20 @@ describe('tool rules cannot be bypassed through Content-Type', () => {
 
 describe('post-login redirect', () => {
   const origin = 'https://proxy.example';
-  it('keeps same-origin paths', () => {
-    expect(sameOriginPath('/authorize?client_id=x&state=y', origin)).toBe('/authorize?client_id=x&state=y');
-    expect(sameOriginPath('/admin', origin)).toBe('/admin');
+  it('keeps same-origin paths, as absolute URLs', () => {
+    expect(sameOriginPath('/authorize?client_id=x&state=y', origin)).toBe('https://proxy.example/authorize?client_id=x&state=y');
+    expect(sameOriginPath('/admin', origin)).toBe('https://proxy.example/admin');
   });
   it('refuses anything that leaves the origin', () => {
     for (const next of ['//evil.example', '/\\evil.example', '\\\\evil.example', 'https://evil.example/', '/\t/evil.example', 'javascript:alert(1)', 'https://proxy.example.evil.example/']) {
-      expect(sameOriginPath(next, origin)).toBe('/admin');
+      expect(sameOriginPath(next, origin)).toBe('https://proxy.example/admin');
+    }
+  });
+  it('never yields a target a browser could read as another host', () => {
+    // Dot segments collapse to a "//host" path; the absolute result keeps it on this origin.
+    for (const next of ['/.//evil.example', '/..//evil.example', '/a/..//evil.example', '/./\\evil.example']) {
+      const target = sameOriginPath(next, origin);
+      expect(new URL(target, 'https://somewhere-else.example').origin).toBe(origin);
     }
   });
 });

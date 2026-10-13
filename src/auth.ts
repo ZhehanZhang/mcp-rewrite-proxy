@@ -38,17 +38,18 @@ export function readCookie(request: Request, name: string): string | undefined {
 }
 
 /**
- * A redirect target on this proxy's own origin, or /admin. Resolving the URL (instead of checking
- * for a leading "/") also catches forms browsers treat as another host, like "/\\evil.example".
+ * A redirect target on this proxy's own origin, as an absolute URL, or the admin page. The result
+ * is absolute on purpose: a bare path can still leave the origin, because "/.//evil.example"
+ * resolves to the path "//evil.example", which a browser reads as another host.
  */
 export function sameOriginPath(next: string, origin: string): string {
   try {
     const url = new URL(next, origin);
-    if (url.origin === origin && !/[\\\x00-\x1f]/.test(next)) return url.pathname + url.search;
+    if (url.origin === origin && !/[\\\x00-\x1f]/.test(next)) return `${origin}${url.pathname}${url.search}`;
   } catch {
     // fall through
   }
-  return '/admin';
+  return `${origin}/admin`;
 }
 
 /** Rejects cross-site form posts and fetches to state-changing endpoints. */
